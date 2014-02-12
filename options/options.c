@@ -258,6 +258,8 @@ const m_option_t mp_opts[] = {
     OPT_CHOICE_OR_INT("cache-pause", stream_cache_pause, 0,
                       0, 40, ({"no", -1})),
 
+    OPT_INTRANGE("read-chunk",stream_read_chunk,0,128,33554432),
+
     {"cdrom-device", &cdrom_device, CONF_TYPE_STRING, 0, 0, 0, NULL},
 #if HAVE_DVDREAD || HAVE_DVDNAV
     {"dvd-device", &dvd_device,  CONF_TYPE_STRING, 0, 0, 0, NULL},
@@ -697,6 +699,7 @@ const struct MPOpts mp_default_opts = {
     .chapter_seek_threshold = 5.0,
     .load_config = 1,
     .position_resume = 1,
+    .stream_read_chunk = 0,
     .stream_cache_min_percent = 20.0,
     .stream_cache_seek_min_percent = 50.0,
     .stream_cache_pause = 10.0,

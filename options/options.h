@@ -107,6 +107,7 @@ typedef struct MPOpts {
     int quiet;
     int load_config;
     int use_filedir_conf;
+    int stream_read_chunk;
     int stream_cache_size;
     int stream_cache_def_size;
     float stream_cache_min_percent;

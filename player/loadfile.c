@@ -1142,6 +1142,10 @@ static void play_current_file(struct MPContext *mpctx)
     // Must be called before enabling cache.
     mp_nav_init(mpctx);
 
+    /// set the stream read chunk from the command line option
+    if(opts->stream_read_chunk)
+      mpctx->stream->read_chunk=opts->stream_read_chunk;
+
     // CACHE2: initial prefill: 20%  later: 5%  (should be set by -cacheopts)
     int res = stream_enable_cache_percent(&mpctx->stream,
                                           opts->stream_cache_size,
