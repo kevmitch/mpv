@@ -215,12 +215,11 @@ exit_label:
     return false;
 }
 
-static void update_waveformat_datarate(WAVEFORMATEXTENSIBLE *wformat, int alignment)
+static void update_waveformat_datarate(WAVEFORMATEXTENSIBLE *wformat)
 {
     WAVEFORMATEX *wf = &wformat->Format;
     wf->nBlockAlign     = wf->nChannels      * wf->wBitsPerSample / 8;
     wf->nAvgBytesPerSec = wf->nSamplesPerSec * wf->nBlockAlign;
-    wf->nBlockAlign    *= alignment;
 }
 
 static void set_waveformat(WAVEFORMATEXTENSIBLE *wformat,
@@ -236,7 +235,7 @@ static void set_waveformat(WAVEFORMATEXTENSIBLE *wformat,
     wformat->SubFormat = *format_to_subtype(format);
     wformat->Samples.wValidBitsPerSample = valid_bits ? valid_bits : wformat->Format.wBitsPerSample;
     wformat->dwChannelMask = mp_chmap_to_waveext(channels);
-    update_waveformat_datarate(wformat, af_format_sample_alignment(format));
+    update_waveformat_datarate(wformat);
 }
 
 // This implicitly transforms all pcm formats to:
@@ -255,20 +254,20 @@ static void set_waveformat_with_ao(WAVEFORMATEXTENSIBLE *wformat, struct ao *ao)
 }
 
 // other wformat parameters must already be set with set_waveformat
-static void change_pcm_waveformat_samplerate(WAVEFORMATEXTENSIBLE *wformat,
-                                             DWORD samplerate)
+static void change_waveformat_samplerate(WAVEFORMATEXTENSIBLE *wformat,
+                                         DWORD samplerate)
 {
     wformat->Format.nSamplesPerSec = samplerate;
-    update_waveformat_datarate(wformat, 1); // alignment = 1 assumes PCM
+    update_waveformat_datarate(wformat);
 }
 
 // other wformat parameters must already be set with set_waveformat
-static void change_pcm_waveformat_channels(WAVEFORMATEXTENSIBLE *wformat,
-                                           struct mp_chmap *channels)
+static void change_waveformat_channels(WAVEFORMATEXTENSIBLE *wformat,
+                                       struct mp_chmap *channels)
 {
     wformat->Format.nChannels = channels->num;
     wformat->dwChannelMask    = mp_chmap_to_waveext(channels);
-    update_waveformat_datarate(wformat, 1); // alignment = 1 assumes PCM
+    update_waveformat_datarate(wformat);
 }
 
 static WORD waveformat_valid_bits(const WAVEFORMATEX *wf)
@@ -451,7 +450,7 @@ static bool search_samplerates(struct ao *ao, WAVEFORMATEXTENSIBLE *wformat,
             if (search_sample_formats(ao, wformat, try[i], channels))
                 supported[n++] = try[i];
         } else {
-            change_pcm_waveformat_samplerate(wformat, try[i]);
+            change_waveformat_samplerate(wformat, try[i]);
             if (try_format_exclusive(ao, wformat))
                 supported[n++] = try[i];
         }
@@ -460,14 +459,14 @@ static bool search_samplerates(struct ao *ao, WAVEFORMATEXTENSIBLE *wformat,
     for (int i = 0; supported[i]; i++) {
         // first choose the lowest integer multiple of the sample rate
         if (!(supported[i] % ao->samplerate)) {
-            change_pcm_waveformat_samplerate(wformat, supported[i]);
+            change_waveformat_samplerate(wformat, supported[i]);
             return true;
         }
     }
 
     // then choose the highest supported (if any)
     if (n) {
-        change_pcm_waveformat_samplerate(wformat, supported[n-1]);
+        change_waveformat_samplerate(wformat, supported[n-1]);
         return true;
     }
 
@@ -500,7 +499,7 @@ static bool search_channels(struct ao *ao, WAVEFORMATEXTENSIBLE *wformat)
                 MP_VERBOSE(ao, "%s is supported\n", waveformat_to_str(&wformat->Format));
             }
         } else {
-            change_pcm_waveformat_channels(wformat, &entry);
+            change_waveformat_channels(wformat, &entry);
             if (try_format_exclusive(ao, wformat)) {
                 mp_chmap_sel_add_map(&chmap_sel, &entry);
                 MP_VERBOSE(ao, "%s is supported\n", mp_chmap_to_str(&entry));
@@ -510,7 +509,7 @@ static bool search_channels(struct ao *ao, WAVEFORMATEXTENSIBLE *wformat)
 
     entry = ao->channels;
     if (ao_chmap_sel_adjust(ao, &chmap_sel, &entry)){
-        change_pcm_waveformat_channels(wformat, &entry);
+        change_waveformat_channels(wformat, &entry);
         return true;
     }
 
