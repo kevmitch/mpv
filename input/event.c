@@ -43,7 +43,7 @@ void mp_event_drop_files(struct input_ctx *ictx, int num_files, char **files)
                 "loadfile",
                 files[i],
                 /* Start playing the dropped files right away */
-                (i == 0) ? "replace" : "append",
+                (i == 0) ? "append-play" : "append",
                 NULL
             };
             mp_input_run_cmd(ictx, cmd);
