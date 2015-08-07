@@ -1954,6 +1954,7 @@ validate_user_opts()
 
 mp.register_event("start-file", request_init)
 mp.register_event("tracks-changed", request_init)
+mp.register_event("file-loaded", request_init)
 
 mp.register_script_message("enable-osc", function() enable_osc(true) end)
 mp.register_script_message("disable-osc", function() enable_osc(false) end)
