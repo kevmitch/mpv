@@ -13,7 +13,7 @@ local user_opts = {
     showfullscreen = true,      -- show OSC when fullscreen?
     scalewindowed = 1,          -- scaling of the controller when windowed
     scalefullscreen = 1,        -- scaling of the controller when fullscreen
-    scaleforcedwindow = 2,      -- scaling when rendered on a forced window
+    scaleforcedwindow = 2,      -- scaling when rendered on a forced windowp
     vidscale = true,            -- scale the controller with the video?
     valign = 0.8,               -- vertical alignment, -1 (top) to 1 (bottom)
     halign = 0,                 -- horizontal alignment, -1 (left) to 1 (right)
@@ -1954,7 +1954,7 @@ validate_user_opts()
 
 mp.register_event("start-file", request_init)
 mp.register_event("tracks-changed", request_init)
-mp.register_event("file-loaded", request_init)
+mp.observe_property("playlist/count", nil, request_init)
 
 mp.register_script_message("enable-osc", function() enable_osc(true) end)
 mp.register_script_message("disable-osc", function() enable_osc(false) end)
