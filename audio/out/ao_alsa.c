@@ -462,37 +462,6 @@ static int init_device(struct ao *ao, bool second_try)
     err = snd_pcm_hw_params_any(p->alsa, alsa_hwparams);
     CHECK_ALSA_ERROR("Unable to get initial parameters");
 
-    int try_formats[AF_FORMAT_COUNT];
-    int format = 0;
-    af_get_best_sample_formats(ao->format, try_formats);
-    for (int n = 0; try_formats[n]; n++) {
-        format = try_formats[n];
-        p->alsa_fmt = find_alsa_format(format);
-        if (snd_pcm_hw_params_test_format(p->alsa, alsa_hwparams, p->alsa_fmt) >= 0)
-            break;
-    }
-
-    if (format) {
-        ao->format = format;
-    } else {
-        MP_ERR(ao, "Can't find appropriate sample format.\n");
-        goto alsa_error;
-    }
-
-    err = snd_pcm_hw_params_set_format(p->alsa, alsa_hwparams, p->alsa_fmt);
-    CHECK_ALSA_ERROR("Unable to set format");
-
-    snd_pcm_access_t access = af_fmt_is_planar(ao->format)
-                                    ? SND_PCM_ACCESS_RW_NONINTERLEAVED
-                                    : SND_PCM_ACCESS_RW_INTERLEAVED;
-    err = snd_pcm_hw_params_set_access(p->alsa, alsa_hwparams, access);
-    if (err < 0 && af_fmt_is_planar(ao->format)) {
-        ao->format = af_fmt_from_planar(ao->format);
-        access = SND_PCM_ACCESS_RW_INTERLEAVED;
-        err = snd_pcm_hw_params_set_access(p->alsa, alsa_hwparams, access);
-    }
-    CHECK_ALSA_ERROR("Unable to set access type");
-
     struct mp_chmap dev_chmap = ao->channels;
     if (af_fmt_is_spdif(ao->format) || p->cfg_ignore_chmap) {
         dev_chmap.num = 0; // disable chmap API
@@ -536,6 +505,37 @@ static int init_device(struct ao *ao, bool second_try)
     err = snd_pcm_hw_params_set_rate_near
             (p->alsa, alsa_hwparams, &ao->samplerate, NULL);
     CHECK_ALSA_ERROR("Unable to set samplerate-2");
+
+    int try_formats[AF_FORMAT_COUNT];
+    int format = 0;
+    af_get_best_sample_formats(ao->format, try_formats);
+    for (int n = 0; try_formats[n]; n++) {
+        format = try_formats[n];
+        p->alsa_fmt = find_alsa_format(format);
+        if (snd_pcm_hw_params_test_format(p->alsa, alsa_hwparams, p->alsa_fmt) >= 0)
+            break;
+    }
+
+    if (format) {
+        ao->format = format;
+    } else {
+        MP_ERR(ao, "Can't find appropriate sample format.\n");
+        goto alsa_error;
+    }
+
+    err = snd_pcm_hw_params_set_format(p->alsa, alsa_hwparams, p->alsa_fmt);
+    CHECK_ALSA_ERROR("Unable to set format");
+
+    snd_pcm_access_t access = af_fmt_is_planar(ao->format)
+                                    ? SND_PCM_ACCESS_RW_NONINTERLEAVED
+                                    : SND_PCM_ACCESS_RW_INTERLEAVED;
+    err = snd_pcm_hw_params_set_access(p->alsa, alsa_hwparams, access);
+    if (err < 0 && af_fmt_is_planar(ao->format)) {
+        ao->format = af_fmt_from_planar(ao->format);
+        access = SND_PCM_ACCESS_RW_INTERLEAVED;
+        err = snd_pcm_hw_params_set_access(p->alsa, alsa_hwparams, access);
+    }
+    CHECK_ALSA_ERROR("Unable to set access type");
 
     err = snd_pcm_hw_params_set_buffer_time_near
             (p->alsa, alsa_hwparams, &(unsigned int){BUFFER_TIME}, NULL);
