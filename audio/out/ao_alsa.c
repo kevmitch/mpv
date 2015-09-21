@@ -512,12 +512,14 @@ static int init_device(struct ao *ao, bool second_try)
     for (int n = 0; try_formats[n]; n++) {
         format = try_formats[n];
         p->alsa_fmt = find_alsa_format(format);
+        MP_DBG(ao, "Trying sample format %s\n", af_fmt_to_str(format));
         if (snd_pcm_hw_params_test_format(p->alsa, alsa_hwparams, p->alsa_fmt) >= 0)
             break;
     }
 
     if (format) {
         ao->format = format;
+        MP_DBG(ao, "Selected sample format %s\n", af_fmt_to_str(ao->format));
     } else {
         MP_ERR(ao, "Can't find appropriate sample format.\n");
         goto alsa_error;
