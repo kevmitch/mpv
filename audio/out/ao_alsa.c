@@ -467,8 +467,11 @@ static int init_device(struct ao *ao, bool second_try)
     for (int n = 0; try_formats[n]; n++) {
         ao->format = try_formats[n];
         p->alsa_fmt = find_alsa_format(ao->format);
-        if (snd_pcm_hw_params_test_format(p->alsa, alsa_hwparams, p->alsa_fmt) >= 0)
+        if (snd_pcm_hw_params_test_format(p->alsa, alsa_hwparams, p->alsa_fmt) < 0) {
+            ao->format = 0;
+        } else {
             break;
+        }
     }
 
     if (!ao->format) {
