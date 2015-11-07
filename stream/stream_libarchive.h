@@ -1,9 +1,9 @@
 struct mp_log;
 
+#define MP_ARCHIVE_READ_SIZE 4096
 struct mp_archive {
     struct archive *arch;
-    struct stream *src;
-    char buffer[4096];
+    char buffer[MP_ARCHIVE_READ_SIZE];
 };
 
 void mp_archive_free(struct mp_archive *mpa);
