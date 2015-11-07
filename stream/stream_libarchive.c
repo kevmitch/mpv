@@ -50,7 +50,7 @@ static int64_t seek_cb(struct archive *arch, void *priv,
     default:
         return -1;
     }
-    return stream_seek(mpa->src, offset) ? offset : -1;
+    return stream_seek(mpa->src, offset) ? stream_tell(mpa->src) : -1;
 }
 
 static int64_t skip_cb(struct archive *arch, void *priv, int64_t request)
