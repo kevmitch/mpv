@@ -24,6 +24,7 @@
 #define DXVA2API_USE_BITFIELDS
 
 #include <stdint.h>
+#include <assert.h>
 
 #include <d3d9.h>
 #include <dxva2api.h>
@@ -97,11 +98,6 @@ static const dxva2_mode dxva2_modes[] = {
 
 #undef MODE
 
-typedef struct surface_info {
-    int used;
-    uint64_t age;
-} surface_info;
-
 typedef struct DXVA2Context {
     struct mp_log *log;
 
@@ -119,42 +115,20 @@ typedef struct DXVA2Context {
     GUID                        decoder_guid;
     DXVA2_ConfigPictureDecode   decoder_config;
 
-    LPDIRECT3DSURFACE9          *surfaces;
-    surface_info                *surface_infos;
-    uint32_t                    num_surfaces;
-    uint64_t                    surface_age;
-
+    struct mp_image_pool       *pool;
     struct mp_image_pool       *sw_pool;
 
     struct dxva_context         *av_dxva_ctx;
 } DXVA2Context;
 
-typedef struct DXVA2SurfaceWrapper {
-    DXVA2Context         *ctx;
-    LPDIRECT3DSURFACE9   surface;
-    IDirectXVideoDecoder *decoder;
-} DXVA2SurfaceWrapper;
-
 static void dxva2_destroy_decoder(struct lavc_ctx *s)
 {
     DXVA2Context *ctx = s->hwdec_priv;
-    int i;
-
-    if (ctx->surfaces) {
-        for (i = 0; i < ctx->num_surfaces; i++) {
-            if (ctx->surfaces[i])
-                IDirect3DSurface9_Release(ctx->surfaces[i]);
-        }
-    }
-    av_freep(&ctx->surfaces);
-    av_freep(&ctx->surface_infos);
-    ctx->num_surfaces = 0;
-    ctx->surface_age  = 0;
-
     if (ctx->decoder) {
         IDirectXVideoDecoder_Release(ctx->decoder);
         ctx->decoder = NULL;
     }
+    mp_image_pool_clear(ctx->pool);
 }
 
 static void dxva2_uninit(struct lavc_ctx *s)
@@ -192,59 +166,14 @@ static void dxva2_uninit(struct lavc_ctx *s)
     s->hwdec_priv = NULL;
 }
 
-static void dxva2_release_img(void *ptr)
-{
-    DXVA2SurfaceWrapper *w   = ptr;
-    DXVA2Context        *ctx = w->ctx;
-    int i;
-
-    for (i = 0; i < ctx->num_surfaces; i++) {
-        if (ctx->surfaces[i] == w->surface) {
-            ctx->surface_infos[i].used = 0;
-            break;
-        }
-    }
-    IDirect3DSurface9_Release(w->surface);
-    IDirectXVideoDecoder_Release(w->decoder);
-    av_free(w);
-}
-
-static struct mp_image *dxva2_allocate_image(struct lavc_ctx *s,
-                                             int img_w, int img_h)
+static struct mp_image *dxva2_allocate_image(struct lavc_ctx *s, int w, int h)
 {
     DXVA2Context *ctx = s->hwdec_priv;
 
-    int i, old_unused = -1;
-    for (i = 0; i < ctx->num_surfaces; i++) {
-        surface_info *info = &ctx->surface_infos[i];
-        if (!info->used && (old_unused == -1 || info->age < ctx->surface_infos[old_unused].age))
-            old_unused = i;
-    }
-    if (old_unused == -1) {
-        MP_ERR(ctx, "No free DXVA2 surface!\n");
-        return NULL;
-    }
-    i = old_unused;
-
-    DXVA2SurfaceWrapper *w = av_mallocz(sizeof(*w));
-    if (!w)
-        return NULL;
-
-    w->ctx     = ctx;
-    w->surface = ctx->surfaces[i];;
-    IDirect3DSurface9_AddRef(w->surface);
-    w->decoder = ctx->decoder;
-    IDirectXVideoDecoder_AddRef(w->decoder);
-
-    ctx->surface_infos[i].used = 1;
-    ctx->surface_infos[i].age  = ctx->surface_age++;
-
-    struct mp_image mpi = {0};
-    mp_image_setfmt(&mpi, IMGFMT_DXVA2);
-    mp_image_set_size(&mpi, img_w, img_h);
-    mpi.planes[3] = (void *)w->surface;
-
-    return mp_image_new_custom_ref(&mpi, w, dxva2_release_img);
+    struct mp_image *img = mp_image_pool_get(ctx->pool, IMGFMT_VAAPI, w, h);
+    if (!img)
+        MP_ERR(ctx, "Failed to allocate additional DXVA2 surface.\n");
+    return img;
 }
 
 static void copy_nv12(struct mp_image *dest, uint8_t *src_bits,
@@ -261,11 +190,17 @@ static void copy_nv12(struct mp_image *dest, uint8_t *src_bits,
     mp_image_copy_gpu(dest, &buf);
 }
 
+static LPDIRECT3DSURFACE9 d3d9_surface_in_mp_image(struct mp_image *mpi)
+{
+    return mpi && mpi->imgfmt == IMGFMT_DXVA2 ?
+        (LPDIRECT3DSURFACE9)mpi->planes[3] : NULL;
+}
+
 static struct mp_image *dxva2_retrieve_image(struct lavc_ctx *s,
                                              struct mp_image *img)
 {
     DXVA2Context       *ctx = s->hwdec_priv;
-    LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)img->planes[3];
+    LPDIRECT3DSURFACE9 surface = d3d9_surface_in_mp_image(img);
     D3DSURFACE_DESC    surfaceDesc;
     D3DLOCKED_RECT     LockedRect;
     HRESULT            hr;
@@ -472,6 +407,87 @@ static int dxva2_get_decoder_configuration(struct lavc_ctx *s,
     return 0;
 }
 
+struct pool_release_ctx {
+    LPDIRECT3DSURFACE9   surface;
+    IDirectXVideoDecoder *decoder;
+};
+
+static void dxva2_pool_release_img(void *arg)
+{
+    struct pool_release_ctx *release_ctx = arg;
+    IDirect3DSurface9_Release(release_ctx->surface);
+    if (release_ctx->decoder)
+        IDirectXVideoDecoder_Release(release_ctx->decoder);
+    av_free(release_ctx);
+}
+
+static void dxva2_img_ref_decoder(struct mp_image *mpi,
+                                  IDirectXVideoDecoder *decoder)
+{
+    assert(mpi && mpi->imgfmt == IMGFMT_DXVA2);
+    struct pool_release_ctx *release_ctx = (struct pool_release_ctx *)mpi->planes[0];
+    if (release_ctx->decoder)
+        IDirectXVideoDecoder_Release(release_ctx->decoder);
+    release_ctx->decoder = decoder;
+    IDirectXVideoDecoder_AddRef(release_ctx->decoder);
+}
+
+struct pool_alloc_ctx {
+    IDirectXVideoDecoderService *decoder_service;
+    D3DFORMAT target_format;
+    int surface_alignment;
+};
+
+static struct mp_image *dxva2_pool_alloc_img(void *arg, int fmt, int w, int h)
+{
+    if (fmt != IMGFMT_DXVA2)
+        return NULL;
+    struct pool_alloc_ctx *alloc_ctx = arg;
+    HRESULT hr;
+    LPDIRECT3DSURFACE9 surface;
+    hr = IDirectXVideoDecoderService_CreateSurface(
+        alloc_ctx->decoder_service,
+        FFALIGN(w, alloc_ctx->surface_alignment),
+        FFALIGN(h, alloc_ctx->surface_alignment),
+        0, alloc_ctx->target_format, D3DPOOL_DEFAULT, 0,
+        DXVA2_VideoDecoderRenderTarget,
+        &surface, NULL);
+    if (FAILED(hr))
+        return NULL;
+
+    struct pool_release_ctx *release_ctx = av_mallocz(sizeof(*release_ctx));
+    if (!release_ctx) {
+        IDirect3DSurface9_Release(surface);
+        return NULL;
+    }
+
+    release_ctx->surface = surface;
+    IDirect3DSurface9_AddRef   (release_ctx->surface);
+
+    struct mp_image mpi = {0};
+    mp_image_setfmt(&mpi, IMGFMT_DXVA2);
+    mp_image_set_size(&mpi, w, h);
+    mpi.planes[0] = (void *)release_ctx;
+    mpi.planes[3] = (void *)release_ctx->surface;
+
+    return mp_image_new_custom_ref(&mpi, release_ctx, dxva2_pool_release_img);
+}
+
+static void dxva2_pool_set_allocator(struct mp_image_pool *pool,
+                                     IDirectXVideoDecoderService *decoder_service,
+                                     D3DFORMAT target_format,
+                                     int surface_alignment)
+{
+    struct pool_alloc_ctx *alloc_ctx = talloc_ptrtype(pool, alloc_ctx);
+    *alloc_ctx =  (struct pool_alloc_ctx){
+        decoder_service   = decoder_service,
+        target_format     = target_format,
+        surface_alignment = surface_alignment
+    };
+    mp_image_pool_set_allocator(pool, dxva2_pool_alloc_img, alloc_ctx);
+    mp_image_pool_set_lru(pool);
+}
+
 static int dxva2_create_decoder(struct lavc_ctx *s, int w, int h,
                                 enum AVCodecID codec_id, int profile)
 {
@@ -484,7 +500,9 @@ static int dxva2_create_decoder(struct lavc_ctx *s, int w, int h,
     DXVA2_VideoDesc desc = { 0 };
     DXVA2_ConfigPictureDecode config;
     HRESULT hr;
-    int surface_alignment;
+    struct mp_image **reserve;
+    LPDIRECT3DSURFACE9 *surfaces;
+    int surface_alignment, num_surfaces;
     int ret;
 
     hr = IDirectXVideoDecoderService_GetDecoderDeviceGuids(ctx->decoder_service, &guid_count, &guid_list);
@@ -576,49 +594,42 @@ static int dxva2_create_decoder(struct lavc_ctx *s, int w, int h,
         surface_alignment = 16;
 
     /* 4 base work surfaces */
-    ctx->num_surfaces = 4 + ADDTIONAL_SURFACES;
+    num_surfaces = 4 + ADDTIONAL_SURFACES;
 
     /* add surfaces based on number of possible refs */
     if (codec_id == AV_CODEC_ID_H264 || codec_id == AV_CODEC_ID_HEVC)
-        ctx->num_surfaces += 16;
+        num_surfaces += 16;
     else
-        ctx->num_surfaces += 2;
+        num_surfaces += 2;
 
-    ctx->surfaces      = av_mallocz(ctx->num_surfaces * sizeof(*ctx->surfaces));
-    ctx->surface_infos = av_mallocz(ctx->num_surfaces * sizeof(*ctx->surface_infos));
-
-    if (!ctx->surfaces || !ctx->surface_infos) {
-        MP_ERR(ctx, "Unable to allocate surface arrays\n");
-        goto fail;
+    ctx->pool = talloc_steal(ctx, mp_image_pool_new(num_surfaces));
+    dxva2_pool_set_allocator(ctx->pool, ctx->decoder_service,
+                             target_format, surface_alignment);
+    reserve = talloc_array(NULL, struct mp_image *, num_surfaces);
+    surfaces = talloc_array(NULL, LPDIRECT3DSURFACE9, num_surfaces);
+    for (i = 0; i < num_surfaces; i++) {
+        reserve[i] = mp_image_pool_get(ctx->pool, IMGFMT_VAAPI, w, h);
+        surfaces[i] = d3d9_surface_in_mp_image(reserve[i]);
     }
-
-    hr = IDirectXVideoDecoderService_CreateSurface(ctx->decoder_service,
-                                                   FFALIGN(w, surface_alignment),
-                                                   FFALIGN(h, surface_alignment),
-                                                   ctx->num_surfaces - 1,
-                                                   target_format, D3DPOOL_DEFAULT, 0,
-                                                   DXVA2_VideoDecoderRenderTarget,
-                                                   ctx->surfaces, NULL);
-    if (FAILED(hr)) {
-        MP_ERR(ctx, "Failed to create %d video surfaces\n", ctx->num_surfaces);
-        goto fail;
-    }
-
     hr = IDirectXVideoDecoderService_CreateVideoDecoder(ctx->decoder_service, &device_guid,
-                                                        &desc, &config, ctx->surfaces,
-                                                        ctx->num_surfaces, &ctx->decoder);
+                                                        &desc, &config, surfaces,
+                                                        num_surfaces, &ctx->decoder);
     if (FAILED(hr)) {
         MP_ERR(ctx, "Failed to create DXVA2 video decoder\n");
         goto fail;
     }
+    talloc_free(surfaces);
+    for (i = 0; i < num_surfaces; i++) {
+        dxva2_img_ref_decoder(reserve[i], ctx->decoder);
+        talloc_free(reserve[i]);
+    }
+    talloc_free(reserve);
 
     ctx->decoder_guid   = device_guid;
     ctx->decoder_config = config;
 
     dxva_ctx->cfg           = &ctx->decoder_config;
     dxva_ctx->decoder       = ctx->decoder;
-    dxva_ctx->surface       = ctx->surfaces;
-    dxva_ctx->surface_count = ctx->num_surfaces;
 
     if (IsEqualGUID(&ctx->decoder_guid, &DXVADDI_Intel_ModeH264_E))
         dxva_ctx->workaround |= FF_DXVA2_WORKAROUND_INTEL_CLEARVIDEO;
