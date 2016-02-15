@@ -582,16 +582,18 @@ static int dxva2_create_decoder(struct lavc_ctx *s, int w, int h,
         goto fail;
     }
 
-    hr = IDirectXVideoDecoderService_CreateSurface(ctx->decoder_service,
-                                                   FFALIGN(w, surface_alignment),
-                                                   FFALIGN(h, surface_alignment),
-                                                   ctx->num_surfaces - 1,
-                                                   target_format, D3DPOOL_DEFAULT, 0,
-                                                   DXVA2_VideoDecoderRenderTarget,
-                                                   ctx->surfaces, NULL);
-    if (FAILED(hr)) {
-        MP_ERR(ctx, "Failed to create %d video surfaces\n", ctx->num_surfaces);
-        goto fail;
+    for (i = 0; i < ctx->num_surfaces; i++) {
+        hr = IDirectXVideoDecoderService_CreateSurface(ctx->decoder_service,
+                                                       FFALIGN(w, surface_alignment),
+                                                       FFALIGN(h, surface_alignment),
+                                                       0,
+                                                       target_format, D3DPOOL_DEFAULT, 0,
+                                                       DXVA2_VideoDecoderRenderTarget,
+                                                       &ctx->surfaces[i], NULL);
+        if (FAILED(hr)) {
+            MP_ERR(ctx, "Failed to create %d video surfaces\n", ctx->num_surfaces);
+            goto fail;
+        }
     }
 
     hr = IDirectXVideoDecoderService_CreateVideoDecoder(ctx->decoder_service, &device_guid,
