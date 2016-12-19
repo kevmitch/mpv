@@ -21,6 +21,8 @@
 
 #define DXVA2API_USE_BITFIELDS
 #include <libavcodec/dxva2.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_dxva2.h>
 
 #include "lavc.h"
 #include "common/common.h"
@@ -37,10 +39,7 @@
 struct priv {
     struct mp_log *log;
 
-    IDirect3D9                  *d3d9;
-    IDirect3DDevice9            *device;
-    HANDLE                       device_handle;
-    IDirect3DDeviceManager9     *device_manager;
+    AVBufferRef                 *hw_device_ref;
     IDirectXVideoDecoderService *decoder_service;
 
     struct mp_image_pool        *decoder_pool;
@@ -336,66 +335,123 @@ done:
     return ret;
 }
 
-static void destroy_device(struct lavc_ctx *s)
+/* static void list_adapters(struct lavc_ctx *s) */
+/* { */
+/*     struct priv *p = s->hwdec_priv; */
+/*     UINT n_adapters = IDirect3D9_GetAdapterCount(p->d3d9); */
+/*     MP_WARN(p, "%d graphics adapters:\n", (int) n_adapters); */
+/*     for (UINT i = 0; i < n_adapters; i++) { */
+/*       D3DADAPTER_IDENTIFIER9 adapter_id; */
+/*       HRESULT hr = IDirect3D9_GetAdapterIdentifier( p->d3d9, i, 0, &adapter_id); */
+/*       if (FAILED(hr)) { */
+/* 	MP_ERR(p, "Failed to get adapter %d identifier: %s\n", */
+/*                i, mp_HRESULT_to_str(hr)); */
+/*       } */
+/*       MP_WARN(p, "%d: driver: %s, desc: %s, device %s\n", */
+/* 	      i, adapter_id.Driver, adapter_id.Description, adapter_id.DeviceName); */
+/*     } */
+/* } */
+
+struct dxva2_hwdevice {
+    HANDLE device_handle;
+    IDirect3DDevice9 *device;
+};
+
+static void dxva2_vo_hwdevice_ctx_free(AVHWDeviceContext *device_ctx)
 {
-    struct priv *p = s->hwdec_priv;
+    AVDXVA2DeviceContext *hwctx = device_ctx->hwctx;
+    struct dxva2_hwdevice *hwdevice = device_ctx->user_opaque;
 
-    if (p->device)
-        IDirect3DDevice9_Release(p->device);
+    if (hwctx->devmgr && hwdevice->device_handle != INVALID_HANDLE_VALUE) {
+        IDirect3DDeviceManager9_CloseDeviceHandle(hwctx->devmgr,
+                                                  hwdevice->device_handle);
+    }
 
-    if (p->d3d9)
-        IDirect3D9_Release(p->d3d9);
+    if (hwctx->devmgr)
+        IDirect3DDeviceManager9_Release(hwctx->devmgr);
+
+    if (hwdevice->device)
+        IDirect3DDevice9_Release(hwdevice->device);
+
+    av_freep(&device_ctx->user_opaque);
 }
 
-static bool create_device(struct lavc_ctx *s)
+static AVBufferRef *dxva2_vo_hwdevice_ctx_create(struct lavc_ctx *s)
 {
+    HRESULT hr;
     struct priv *p = s->hwdec_priv;
 
+    IDirect3DDevice9 *device = hwdec_devices_load(s->hwdec_devs,
+                                                  s->hwdec->type);
+    if (!device)
+        return NULL;
+    MP_VERBOSE(p, "Using VO-supplied device %p.\n", device);
+
+    AVBufferRef *hw_device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DXVA2);
+    if (!hw_device_ref) {
+        MP_ERR(p, "Failed to allocate hw_device_ref\n");
+        return NULL;
+    }
+    AVHWDeviceContext *device_ctx = (AVHWDeviceContext *)hw_device_ref->data;
+    AVDXVA2DeviceContext *hwctx = device_ctx->hwctx;
+
+    struct dxva2_hwdevice *hwdevice = av_mallocz(sizeof(*hwdevice));
+    if (!hwdevice) {
+        MP_ERR(p, "Failed to allocate hwdevice\n");
+        goto fail;
+    }
+    device_ctx->user_opaque = hwdevice;
+    device_ctx->free        = dxva2_vo_hwdevice_ctx_free;
+
+    hwdevice->device_handle = INVALID_HANDLE_VALUE;
+    hwdevice->device = device;
+    IDirect3D9_AddRef(hwdevice->device);
+
     d3d_load_dlls();
-    if (!d3d9_dll) {
-        MP_ERR(p, "Failed to load D3D9 library\n");
-        return false;
+    if (!dxva2_dll) {
+        MP_ERR(p, "Failed to load DXVA2 library\n");
+        goto fail;
     }
 
-    IDirect3D9* (WINAPI *Direct3DCreate9)(UINT) =
-        (void *)GetProcAddress(d3d9_dll, "Direct3DCreate9");
-    if (!Direct3DCreate9) {
-        MP_ERR(p, "Failed to locate Direct3DCreate9\n");
-        return false;
+    HRESULT (WINAPI *CreateDeviceManager9)(UINT *, IDirect3DDeviceManager9 **) =
+        (void *)GetProcAddress(dxva2_dll, "DXVA2CreateDirect3DDeviceManager9");
+    if (!CreateDeviceManager9) {
+        MP_ERR(p, "Failed to locate DXVA2CreateDirect3DDeviceManager9\n");
+       goto fail;
     }
 
-    p->d3d9 = Direct3DCreate9(D3D_SDK_VERSION);
-    if (!p->d3d9) {
-        MP_ERR(p, "Failed to create IDirect3D object\n");
-        return false;
-    }
-
-    UINT adapter = D3DADAPTER_DEFAULT;
-    D3DDISPLAYMODE display_mode;
-    IDirect3D9_GetAdapterDisplayMode(p->d3d9, adapter, &display_mode);
-    D3DPRESENT_PARAMETERS present_params = {
-        .Windowed         = TRUE,
-        .BackBufferWidth  = 640,
-        .BackBufferHeight = 480,
-        .BackBufferCount  = 0,
-        .BackBufferFormat = display_mode.Format,
-        .SwapEffect       = D3DSWAPEFFECT_DISCARD,
-        .Flags            = D3DPRESENTFLAG_VIDEO,
-    };
-    HRESULT hr = IDirect3D9_CreateDevice(p->d3d9, adapter,
-                                         D3DDEVTYPE_HAL,
-                                         GetShellWindow(),
-                                         D3DCREATE_SOFTWARE_VERTEXPROCESSING |
-                                         D3DCREATE_MULTITHREADED |
-                                         D3DCREATE_FPU_PRESERVE,
-                                         &present_params,
-                                         &p->device);
+    unsigned reset_token = 0;
+    hr = CreateDeviceManager9(&reset_token, &hwctx->devmgr);
     if (FAILED(hr)) {
-        MP_ERR(p, "Failed to create Direct3D device: %s\n",
+        MP_ERR(p, "Failed to create Direct3D device manager: %s\n",
                mp_HRESULT_to_str(hr));
-        return false;
+        goto fail;
     }
-    return true;
+
+    hr = IDirect3DDeviceManager9_ResetDevice(hwctx->devmgr, hwdevice->device,
+                                             reset_token);
+    if (FAILED(hr)) {
+        MP_ERR(p, "Failed to bind Direct3D device to device manager: %s\n",
+               mp_HRESULT_to_str(hr));
+        goto fail;
+    }
+
+    hr = IDirect3DDeviceManager9_OpenDeviceHandle(hwctx->devmgr,
+                                                  &hwdevice->device_handle);
+    if (FAILED(hr)) {
+        MP_ERR(p, "Failed to open device handle\n");
+        goto fail;
+    }
+
+    if (av_hwdevice_ctx_init(hw_device_ref) < 0) {
+        MP_ERR(p, "Failed to initialize hw_device_ref");
+        goto fail;
+    }
+
+    return hw_device_ref;
+ fail:
+    av_buffer_unref(&hw_device_ref);
+    return NULL;
 }
 
 static void dxva2_uninit(struct lavc_ctx *s)
@@ -410,13 +466,7 @@ static void dxva2_uninit(struct lavc_ctx *s)
     if (p->decoder_service)
         IDirectXVideoDecoderService_Release(p->decoder_service);
 
-    if (p->device_manager && p->device_handle != INVALID_HANDLE_VALUE)
-        IDirect3DDeviceManager9_CloseDeviceHandle(p->device_manager, p->device_handle);
-
-    if (p->device_manager)
-        IDirect3DDeviceManager9_Release(p->device_manager);
-
-    destroy_device(s);
+    av_buffer_unref(&p->hw_device_ref);
 
     TA_FREEP(&s->hwdec_priv);
 }
@@ -429,57 +479,33 @@ static int dxva2_init(struct lavc_ctx *s)
         return -1;
 
     s->hwdec_priv = p;
-    p->device_handle = INVALID_HANDLE_VALUE;
-    p->log           = mp_log_new(s, s->log, "dxva2");
+    p->log = mp_log_new(s, s->log, "dxva2");
 
     if (s->hwdec->type == HWDEC_DXVA2_COPY) {
         mp_check_gpu_memcpy(p->log, NULL);
         p->sw_pool = talloc_steal(p, mp_image_pool_new(17));
     }
 
-    p->device = hwdec_devices_load(s->hwdec_devs, s->hwdec->type);
-    if (p->device) {
-        IDirect3D9_AddRef(p->device);
-        MP_VERBOSE(p, "Using VO-supplied device %p.\n", p->device);
-    } else if (s->hwdec->type == HWDEC_DXVA2) {
-        MP_ERR(p, "No Direct3D device provided for native dxva2 decoding\n");
-        goto fail;
-    } else {
-        if (!create_device(s))
+    p->hw_device_ref = dxva2_vo_hwdevice_ctx_create(s);
+    if (!p->hw_device_ref) {
+        if (s->hwdec->type == HWDEC_DXVA2_COPY) {
+            if (av_hwdevice_ctx_create(&p->hw_device_ref,
+                                       AV_HWDEVICE_TYPE_DXVA2,
+                                       NULL, NULL, 0) < 0) {
+                MP_ERR(p, "Failed to create d3d9 device\n");
+                goto fail;
+            }
+        } else {
+            MP_ERR(p, "Failed to get Direct3D9 device for native dxva2 decoding\n");
             goto fail;
+        }
     }
 
-    d3d_load_dlls();
-    if (!dxva2_dll) {
-        MP_ERR(p, "Failed to load DXVA2 library\n");
-        goto fail;
-    }
-
-    HRESULT (WINAPI *CreateDeviceManager9)(UINT *, IDirect3DDeviceManager9 **) =
-        (void *)GetProcAddress(dxva2_dll, "DXVA2CreateDirect3DDeviceManager9");
-    if (!CreateDeviceManager9) {
-        MP_ERR(p, "Failed to locate DXVA2CreateDirect3DDeviceManager9\n");
-        goto fail;
-    }
-
-    unsigned reset_token = 0;
-    hr = CreateDeviceManager9(&reset_token, &p->device_manager);
-    if (FAILED(hr)) {
-        MP_ERR(p, "Failed to create Direct3D device manager: %s\n",
-               mp_HRESULT_to_str(hr));
-        goto fail;
-    }
-
-    hr = IDirect3DDeviceManager9_ResetDevice(p->device_manager,
-                                             p->device, reset_token);
-    if (FAILED(hr)) {
-        MP_ERR(p, "Failed to bind Direct3D device to device manager: %s\n",
-               mp_HRESULT_to_str(hr));
-        goto fail;
-    }
-
-    hr = IDirect3DDeviceManager9_OpenDeviceHandle(p->device_manager,
-                                                  &p->device_handle);
+    AVHWDeviceContext *device_ctx = (AVHWDeviceContext *)p->hw_device_ref->data;
+    AVDXVA2DeviceContext *device_hwctx = device_ctx->hwctx;
+    HANDLE device_handle = INVALID_HANDLE_VALUE;
+    hr = IDirect3DDeviceManager9_OpenDeviceHandle(device_hwctx->devmgr,
+                                                  &device_handle);
     if (FAILED(hr)) {
         MP_ERR(p, "Failed to open device handle: %s\n",
                mp_HRESULT_to_str(hr));
@@ -487,8 +513,12 @@ static int dxva2_init(struct lavc_ctx *s)
     }
 
     hr = IDirect3DDeviceManager9_GetVideoService(
-        p->device_manager, p->device_handle, &IID_IDirectXVideoDecoderService,
+        device_hwctx->devmgr,
+        device_handle,
+        &IID_IDirectXVideoDecoderService,
         (void **)&p->decoder_service);
+    IDirect3DDeviceManager9_CloseDeviceHandle(device_hwctx->devmgr,
+                                              device_handle);
     if (FAILED(hr)) {
         MP_ERR(p, "Failed to create IDirectXVideoDecoderService: %s\n",
                mp_HRESULT_to_str(hr));
