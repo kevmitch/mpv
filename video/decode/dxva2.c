@@ -335,23 +335,6 @@ done:
     return ret;
 }
 
-/* static void list_adapters(struct lavc_ctx *s) */
-/* { */
-/*     struct priv *p = s->hwdec_priv; */
-/*     UINT n_adapters = IDirect3D9_GetAdapterCount(p->d3d9); */
-/*     MP_WARN(p, "%d graphics adapters:\n", (int) n_adapters); */
-/*     for (UINT i = 0; i < n_adapters; i++) { */
-/*       D3DADAPTER_IDENTIFIER9 adapter_id; */
-/*       HRESULT hr = IDirect3D9_GetAdapterIdentifier( p->d3d9, i, 0, &adapter_id); */
-/*       if (FAILED(hr)) { */
-/* 	MP_ERR(p, "Failed to get adapter %d identifier: %s\n", */
-/*                i, mp_HRESULT_to_str(hr)); */
-/*       } */
-/*       MP_WARN(p, "%d: driver: %s, desc: %s, device %s\n", */
-/* 	      i, adapter_id.Driver, adapter_id.Description, adapter_id.DeviceName); */
-/*     } */
-/* } */
-
 struct dxva2_hwdevice {
     HANDLE device_handle;
     IDirect3DDevice9 *device;
@@ -496,7 +479,8 @@ static int dxva2_init(struct lavc_ctx *s)
                 goto fail;
             }
         } else {
-            MP_ERR(p, "Failed to get Direct3D9 device for native dxva2 decoding\n");
+            MP_ERR(p, "Failed to get Direct3D9"
+                   " device for native dxva2 decoding\n");
             goto fail;
         }
     }
